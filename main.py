@@ -1,59 +1,77 @@
+import sqlite3
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-import sqlite3, os
-from apscheduler.schedulers.background import BackgroundScheduler
-import requests
-from bs4 import BeautifulSoup
 
-TOKEN = os.environ["TOKEN"]
-conn = sqlite3.connect("users.db", check_same_thread=False)
+# === 建立 SQLite 資料庫 ===
+conn = sqlite3.connect("subscriptions.db", check_same_thread=False)
 cursor = conn.cursor()
-cursor.execute("""CREATE TABLE IF NOT EXISTS subscriptions (chat_id TEXT, keyword TEXT)""")
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS subscriptions (
+        chat_id INTEGER,
+        keyword TEXT
+    )
+''')
+conn.commit()
 
-# Bot 回應區
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("請輸入你想訂閱的關鍵字")
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    keyword = update.message.text.strip()
+# === 功能：新增關鍵字 ===
+def add_keyword(chat_id: int, keyword: str):
     cursor.execute("INSERT INTO subscriptions (chat_id, keyword) VALUES (?, ?)", (chat_id, keyword))
     conn.commit()
-    await update.message.reply_text(f"成功訂閱關鍵字：{keyword}")
 
-# 爬蟲 + 比對
-def get_latest_posts():
-    url = "https://www.ptt.cc/bbs/Drama-Ticket/index.html"
-    headers = {"cookie": "over18=1"}
-    res = requests.get(url, headers=headers)
-    soup = BeautifulSoup(res.text, "html.parser")
-    articles = []
-    for item in soup.select(".r-ent"):
-        a_tag = item.select_one(".title a")
-        if a_tag:
-            title = a_tag.text.strip()
-            link = "https://www.ptt.cc" + a_tag["href"]
-            articles.append((title, link))
-    return articles
+# === 功能：刪除關鍵字 ===
+def remove_keyword(chat_id: int, keyword: str):
+    cursor.execute("DELETE FROM subscriptions WHERE chat_id=? AND keyword=?", (chat_id, keyword))
+    conn.commit()
 
-def check_for_matches(app):
-    posts = get_latest_posts()
-    cursor.execute("SELECT DISTINCT chat_id, keyword FROM subscriptions")
-    for chat_id, keyword in cursor.fetchall():
-        for title, link in posts:
-            if keyword in title:
-                app.bot.send_message(chat_id=chat_id, text=f"🎫 有新票務文章符合關鍵字「{keyword}」！\n{title}\n{link}")
+# === 功能：查詢已訂閱關鍵字 ===
+def get_keywords(chat_id: int):
+    cursor.execute("SELECT keyword FROM subscriptions WHERE chat_id=?", (chat_id,))
+    return [row[0] for row in cursor.fetchall()]
 
-# 定時器
-scheduler = BackgroundScheduler()
-def start_scheduler(app):
-    scheduler.add_job(lambda: check_for_matches(app), "interval", seconds=60)
-    scheduler.start()
+# === /start ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 歡迎使用 PTT 新文章提醒 Ticki Artino！請直接輸入你想訂閱的關鍵字💖")
 
-# 建立 bot
-app = ApplicationBuilder().token(TOKEN).build()
+# === 訂閱關鍵字（使用者傳文字）===
+async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    keyword = update.message.text.strip()
+
+    add_keyword(chat_id, keyword)
+    await update.message.reply_text(f"✅ 已訂閱關鍵字：「{keyword}」")
+
+# === /list 查看已訂閱 ===
+async def list_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    keywords = get_keywords(chat_id)
+
+    if keywords:
+        await update.message.reply_text("📋 你訂閱的關鍵字：\n" + "\n".join(keywords))
+    else:
+        await update.message.reply_text("📭 你目前沒有訂閱任何關鍵字。")
+
+# === /remove <keyword> 取消訂閱 ===
+async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not context.args:
+        await update.message.reply_text("❗請提供要取消的關鍵字，例如：/remove 五月天")
+        return
+
+    keyword = " ".join(context.args)
+    keywords = get_keywords(chat_id)
+
+    if keyword in keywords:
+        remove_keyword(chat_id, keyword)
+        await update.message.reply_text(f"❌ 已取消訂閱：「{keyword}」")
+    else:
+        await update.message.reply_text(f"⚠️ 你尚未訂閱「{keyword}」")
+
+# === 啟動應用 ===
+app = ApplicationBuilder().token("YOUR_BOT_TOKEN").build()
+
 app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+app.add_handler(CommandHandler("list", list_keywords))
+app.add_handler(CommandHandler("remove", remove))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, subscribe))
 
-start_scheduler(app)
 app.run_polling()
